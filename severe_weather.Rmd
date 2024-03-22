@@ -1,0 +1,351 @@
+---
+title: "Mapping Servere Weather Events"
+output: html_document
+date: "2024-03-03"
+---
+
+## 1 Damage from Storms
+
+### a1) State Level Choropleth Maps
+
+```{r, warning=F, message=F}
+library(tidyverse)
+library(sf)
+library(maps)
+library(ggthemes)
+library(scales)
+library(RColorBrewer)
+library(ggallin)
+
+# ================== Prepare the data ==========================
+# Load the storm data from local file
+storm_df <- read.csv("storms.csv")
+
+# Convert STATE to lowercase
+storm_df <- storm_df %>%
+  mutate(
+    state = str_to_lower(storm_df$STATE),
+    total_damage = DAMAGE_PROPERTY_USD + DAMAGE_CROPS_USD
+  )
+
+# Summarize storm damage to state level
+storm_damage_state <- storm_df %>%
+  group_by(state) %>%
+  summarise(total_damage = sum(total_damage, na.rm = TRUE))
+
+# Prepare USA State level data
+usa_state <- st_as_sf(map("state", fill=TRUE, plot=FALSE))
+
+# Prepare USA State abbreviation
+state_abbr <- data.frame(
+  state = str_to_lower(state.name),
+  abbr = state.abb
+)
+
+# Combine usa state map data and damage data
+state_map_data <- usa_state %>% 
+  left_join(storm_damage_state, by = c("ID" = "state")) %>%
+  left_join(state_abbr, by = c("ID" = "state"))
+
+head(state_map_data)
+```
+
+Generate state level choropleth maps:
+
+```{r, warning=F, message=F}
+# Generate state level map
+ggplot(state_map_data) +
+  geom_sf(aes(fill=total_damage)) +
+  scale_fill_gradientn(
+    "Total damage (USD)", 
+    colors = brewer.pal(9, "OrRd"), trans = pseudolog10_trans,
+    breaks = 10^(7:10), na.value = "grey80", labels=comma) +
+  geom_sf_text(aes(label=abbr), size=3, color="white") +
+  labs(title = "USA Storm Damage on State Level") +
+  theme_void() +
+  theme(plot.title=element_text(face="bold", hjust=.5, size=14),
+        legend.position = "right")
+```
+
+### a2) County Choropleth Maps
+
+First, we prepare the data.
+
+```{r}
+# Prepare storm damage value on county level
+storm_damage_county <- storm_df %>%
+  mutate(county=paste0(state, ",", str_to_lower(CZ_NAME))) %>%
+  group_by(county) %>%
+  summarise(total_damage=sum(total_damage, na.rm=T))
+
+# Prepare usa county data
+usa_county <- st_as_sf(map("county", fill=TRUE, plot=FALSE))
+
+# Combine usa county map data and damage data
+county_map_data <- usa_county %>% 
+  left_join(storm_damage_county, by = c("ID" = "county"))
+
+head(county_map_data)
+```
+
+Then, we create county choropleth map on county level.
+
+```{r}
+# Generate county choropleth map on county level
+ggplot(county_map_data) +
+  geom_sf(aes(fill=total_damage)) +
+  scale_fill_gradientn(
+    "Total damage (USD)",
+    colors = brewer.pal(9, "OrRd"), trans = pseudolog10_trans,
+    breaks = 10^seq(2,10,2), na.value = "grey80", labels=comma) +
+  labs(title = "USA Storm Damage on County Level") +
+  theme_void() +
+  theme(plot.title = element_text(face="bold", hjust=.5, size=14),
+        legend.position = "right")
+```
+
+### b) Density Map
+
+Next, we create density map for unjury and death:
+
+```{r, warning=F, message=F}
+# Prepare data
+injury_death_df <- storm_df %>%
+  mutate(
+    lat = (BEGIN_LAT + END_LAT) / 2,
+    lon = (BEGIN_LON + END_LON) / 2,
+    total_injury = INJURIES_DIRECT + INJURIES_INDIRECT,
+    total_death = DEATHS_DIRECT + DEATHS_INDIRECT
+  ) %>%
+  # Focus on USA continent
+  filter(between(lon, -150, -50)) %>%
+  filter(total_injury > 0 | total_death > 0) %>%
+  dplyr::select(lat, lon, total_injury, total_death)
+```
+
+First, we generate density map for injury (Sum of direct injury and indirect injury).
+
+```{r}
+# Repeat rows on total injury
+injury_df <- injury_death_df[
+  rep(seq_along(injury_death_df$total_injury),
+      times=injury_death_df$total_injury), ]
+
+# Generate density plot for injury
+ggplot(usa_state) +
+  # Background
+  geom_sf(fill="grey90") +
+  stat_density2d(
+    data=injury_df, 
+    aes(x=lon, y=lat, fill=..level..),
+    alpha=.7, geom="polygon", col="black"
+  ) +
+  scale_fill_gradientn(
+    "Total injuries density", 
+    colours=rev(brewer.pal(7,"Spectral"))) +
+  labs(title = "Injury density map") +
+  theme_void() +
+  theme(plot.title = element_text(face="bold", hjust=.5, size=15))
+```
+
+```{r}
+# Repeat rows on total death
+death_df <- injury_death_df[
+  rep(seq_along(injury_death_df$total_death), 
+      times=injury_death_df$total_death), ]
+
+# Generate density plot for death
+ggplot(usa_state) +
+  # Background
+  geom_sf(fill="grey90") +
+  stat_density2d(
+    data=death_df, 
+    aes(x=lon, y=lat, fill=..level..),
+    alpha=.5, geom="polygon", col="black"
+  ) +
+  scale_fill_gradientn(
+    "Total death density", 
+    colours=rev(brewer.pal(7,"Spectral"))) +
+  labs(title = "Death density map") +
+  theme_void() +
+  theme(plot.title = element_text(face="bold", hjust=.5, size=15))
+```
+
+In my view, the detrimental repercussions of the storm manifest through various lenses, encompassing both property damage and casualties. Property losses offer a comprehensive depiction of the storm's impact, spanning buildings, infrastructure, workforce disruption, transportation, and more, whereas injuries and fatalities underscore personal safety concerns. Comparing these aspects proves challenging. Regarding visualization methods, I find choropleth maps to be more intuitive as they distinctly illustrate losses across different administrative regions, whereas density maps merely provide a broad geographic overview.
+
+## 2. Location of Severe Events
+
+### a) Interactive Map of Severe Weather Events
+
+Create a leaflet map of severe weather events
+
+```{r, warning=F, message=F}
+library(leaflet)
+
+# Prepare weather data set
+weather_df <- storm_df %>%
+  mutate(
+    lon = (BEGIN_LON + END_LON) / 2,
+    lat = (BEGIN_LAT + END_LAT) / 2,
+    total_death = DEATHS_DIRECT + DEATHS_INDIRECT
+  ) %>%
+  # Focus on USA mainland
+  filter(between(lon, -150, -69)& lat < 55) %>%
+  # At least one death
+  filter(total_death >= 1)
+
+# Generate leaflet map plot
+leaflet() %>%
+  addTiles() %>%
+  addCircleMarkers(
+    lng=weather_df$lon, 
+    lat=weather_df$lat,
+    stroke = FALSE, 
+    fillOpacity=0.8, radius = 5, 
+    # Prepare popup information
+    popup = paste(
+      "Event Type:", weather_df$EVENT_TYPE, "<br>",
+      "State:", weather_df$state, "<br>",
+      "Damage:", weather_df$total_damage, "<br>",
+      "Date:", weather_df$YEAR, ",", weather_df$MONTH_NAME, "<br>",
+      "Deaths:", weather_df$total_death, "<br>")
+  )
+```
+
+### b) Color by Type of Weather Event
+
+Next, we will recode event type:
+
+```{r}
+# recode event type
+weather_df <- weather_df %>%
+  mutate(less_event_type = ifelse(
+    EVENT_TYPE %in% c("Waterspout", "Hail", "Marine Thunderstorm Wind", 
+                      "Debris Flow", "Marine Strong Wind", "Heavy Rain"),
+    "Others", EVENT_TYPE))
+
+# Convert weather type to factor
+weather_df$less_event_type <- factor(
+  weather_df$less_event_type,
+  levels=c("Flash Flood", "Thunderstorm Wind", "Flood", "Tornado", "Lightning", "Others")
+)
+```
+
+Then, create another leaflet map with different color on weather type:
+
+```{r}
+# Different colors on weather type
+weather_colors <- c("#464e52", "#d5a991", "#95796c", "#a4a39f", "#688694", "#993719")
+
+leaflet() %>%
+  addTiles() %>%
+  addCircleMarkers(
+    lng=weather_df$lon, 
+    lat=weather_df$lat,
+    color = weather_colors[as.numeric(weather_df$less_event_type)],
+    stroke = FALSE, fillOpacity=0.8, radius = 5,
+    # Prepare popup information
+    popup = paste(
+      "Event Type:", weather_df$EVENT_TYPE, "<br>",
+      "State:", weather_df$state, "<br>",
+      "Damage:", weather_df$total_damage, "<br>",
+      "Date:", weather_df$YEAR, ",", weather_df$MONTH_NAME, "<br>",
+      "Deaths:", weather_df$total_death, "<br>")
+  ) %>%
+  addLegend(
+    position = "bottomleft",
+    colors = weather_colors,
+    labels = levels(weather_df$less_event_type),
+    title = "Weather type"
+  )
+```
+
+### c) Cluster
+
+```{r}
+leaflet() %>%
+  addTiles() %>%
+  addCircleMarkers(
+    lng=weather_df$lon, 
+    lat=weather_df$lat,
+    color = weather_colors[as.numeric(weather_df$less_event_type)],
+    stroke = FALSE, fillOpacity=0.8, radius = 8,
+    # Add Cluster on leaflet map
+    clusterOptions = markerClusterOptions(),
+    # Prepare popup information
+    popup = paste(
+      "Event Type:", weather_df$EVENT_TYPE, "<br>",
+      "State:", weather_df$state, "<br>",
+      "Damage:", weather_df$total_damage, "<br>",
+      "Date:", weather_df$YEAR, ",", weather_df$MONTH_NAME, "<br>",
+      "Deaths:", weather_df$total_death, "<br>")
+  ) %>%
+  addLegend(
+    position = "bottomleft",
+    colors = weather_colors,
+    labels = levels(weather_df$less_event_type),
+    title = "Weather type"
+  )
+```
+
+## 3. Severe Events and Cities
+
+```{r, warning=F, message=F}
+library(geosphere)
+
+# Load city data from given link
+cities <- read_csv("us-cities-top-1k.csv") %>%
+  # Find the top 100 city by population
+  arrange(-Population) %>%
+  head(100)
+
+# Find the nearest city for all weather event
+nearest_city <- list()
+for (i in 1:nrow(weather_df)) {
+  weather_coord <- c(weather_df$lon[i], weather_df$lat[i])
+  
+  all_distance <- sapply(1:100, function(x) {
+    distGeo(weather_coord, c(cities$lon[x], cities$lat[x]))
+  })
+  
+  nearest_city[[i]] <- cities$City[which.min(all_distance)]
+}
+
+weather_df$nearest_city <- unlist(nearest_city)
+
+weather_df <- left_join(
+  weather_df, 
+  select(cities, City, State, Population),
+  by = c('nearest_city'='City')
+)
+```
+
+Next, we will generate a scatter plot showing the relationship between the weather event impact and city population.
+
+```{r}
+# Generate scatter plot
+ggplot(weather_df, aes(x=Population, y=total_death)) +
+  geom_point(col="#f72267", alpha=.4) +
+  scale_x_continuous(labels=comma) +
+  labs(x="City population of nearest city", y="Total death",
+       title="Death caused by weather event and city population") +
+  theme_bw() +
+  theme(plot.title = element_text(size=15, hjust=.5, face="bold"),
+        axis.title = element_text(size=13, face="bold"))
+```
+
+```{r, warning=F, message=F}
+library(hrbrthemes)
+
+# Generate scatter plot
+ggplot(weather_df, aes(x=Population, y=total_death)) +
+  geom_point(aes(col=less_event_type), alpha=.4) +
+  facet_wrap(~less_event_type, scales="free_y", ncol=3) +
+  scale_x_continuous(labels=comma, breaks=seq(0, 8e6, 4e6)) +
+  scale_color_manual("Weather Type", values=weather_colors) +
+  labs(x="Population of nearest city", y="Total death",
+       title="Death vs. weather event type and city population") +
+  theme_ipsum() +
+  theme(plot.title = element_text(size=15, hjust=.5, face="bold"),
+        axis.title = element_text(size=13, face="bold"))
+```
